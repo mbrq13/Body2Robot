@@ -22,9 +22,7 @@ GIT_LFS_SKIP_SMUDGE=1 uv run --extra lerobot --extra axol \
   tests/manual/replay_pico_arms_on_axol.py \
   --dataset-root outputs/datasets/dexumi-dataset-v2 \
   --episode 0 \
-  --revision main \
-  --scale 1.0 \
-  --max-frames 300
+  --revision main
 ```
 
 Open the Viser URL printed by the script, usually:
@@ -36,9 +34,17 @@ http://localhost:8002
 The most important tuning flags are:
 
 - `--scale`: changes how much human arm motion is applied to Axol.
-- `--axis-map`: maps PICO deltas to Axol deltas. Default is `z,y,-x`.
+- `--axis-map`: maps PICO deltas to Axol deltas. Default is `z,x,y`.
+- `--axol-workspace front`: anchors the first PICO pose in a symmetric,
+  reachable workspace in front of Axol, then settles the IK branch before
+  replay. This is the default and follows the Dexumi reference experiment.
+- `--axol-workspace rest`: uses the raw URDF rest pose instead, useful only as
+  a comparison against the calibrated workspace.
 - `--max-joint-delta`: allows more or less joint motion per dataset frame.
 - `--left-only` / `--right-only`: isolates one arm while tuning.
+
+Replay loops over the complete episode by default. For one pass that stays open
+for ten seconds at the end, add `--no-loop --hold-after 10`.
 
 ## Compare Axis Maps
 

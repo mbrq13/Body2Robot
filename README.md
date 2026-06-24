@@ -94,12 +94,26 @@ GIT_LFS_SKIP_SMUDGE=1 uv run --extra lerobot --extra axol \
   tests/manual/replay_pico_arms_on_axol.py \
   --dataset-root outputs/datasets/your-dataset \
   --episode 0 \
-  --revision main \
-  --scale 1.0 \
-  --max-frames 300
+  --revision main
 ```
 
-Open the Viser URL printed in the terminal (default port `8002`).
+The replay loops over the full episode by default. It uses the calibrated
+front Axol workspace and the `z,x,y` PICO-to-Axol axis map used by the Dexumi
+reference experiment. Open the Viser URL printed in the terminal (default port
+`8002`).
+
+To compare against raw URDF rest targets in a single pass:
+
+```bash
+GIT_LFS_SKIP_SMUDGE=1 uv run --extra lerobot --extra axol \
+  tests/manual/replay_pico_arms_on_axol.py \
+  --dataset-root outputs/datasets/your-dataset \
+  --episode 0 \
+  --revision main \
+  --axol-workspace rest \
+  --no-loop \
+  --hold-after 10
+```
 
 Compare axis-mapping candidates side by side:
 

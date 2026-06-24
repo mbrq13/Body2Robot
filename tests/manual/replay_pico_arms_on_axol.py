@@ -10,7 +10,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable
 
@@ -262,6 +262,55 @@ class PicoToAxolArmRetargeter:
         return left, right
 
 
+def move_retargeter_to_front_workspace(
+    retargeter: PicoToAxolArmRetargeter,
+    *,
+    wrist_forward: float,
+    wrist_height: float,
+    wrist_lateral: float,
+    elbow_forward: float,
+    elbow_height: float,
+    elbow_lateral: float,
+) -> None:
+    """Anchor PICO motion to a symmetric, reachable Axol front workspace."""
+
+    left_wrist = np.array([wrist_lateral, wrist_forward, wrist_height], dtype=np.float32)
+    right_wrist = np.array(
+        [-wrist_lateral, wrist_forward, wrist_height], dtype=np.float32
+    )
+    left_elbow = np.array([elbow_lateral, elbow_forward, elbow_height], dtype=np.float32)
+    right_elbow = np.array(
+        [-elbow_lateral, elbow_forward, elbow_height], dtype=np.float32
+    )
+
+    retargeter.refs = replace(
+        retargeter.refs,
+        left=replace(
+            retargeter.refs.left,
+            robot_wrist_pos=left_wrist,
+            robot_elbow_pos=left_elbow,
+        ),
+        right=replace(
+            retargeter.refs.right,
+            robot_wrist_pos=right_wrist,
+            robot_elbow_pos=right_elbow,
+        ),
+    )
+
+
+def settle_first_frame(
+    retargeter: PicoToAxolArmRetargeter,
+    first_body_pose: np.ndarray,
+    iterations: int,
+) -> np.ndarray:
+    """Resolve the first frame repeatedly to select a stable Axol IK branch."""
+
+    q = retargeter.q_rest.copy()
+    for _ in range(max(0, iterations)):
+        q = retargeter.retarget_frame(first_body_pose, q)
+    return q
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Replay PICO body arm motion on Axol's Viser simulation."
@@ -278,26 +327,49 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--scale", type=float, default=1.0)
     parser.add_argument(
         "--axis-map",
-        default="z,y,-x",
-        help="PICO delta to Axol delta mapping, e.g. z,y,-x or x,y,z.",
+        default="z,x,y",
+        help="PICO delta to Axol target delta. Default: z,x,y.",
     )
     parser.add_argument("--left-only", action="store_true")
     parser.add_argument("--right-only", action="store_true")
     parser.add_argument("--gripper", type=float, default=1.0)
+    parser.add_argument(
+        "--axol-workspace",
+        choices=("front", "rest"),
+        default="front",
+        help="Use a front/chest Axol workspace or the raw URDF rest pose.",
+    )
+    parser.add_argument("--axol-wrist-forward", type=float, default=-0.34)
+    parser.add_argument("--axol-wrist-height", type=float, default=0.58)
+    parser.add_argument("--axol-wrist-lateral", type=float, default=0.23)
+    parser.add_argument("--axol-elbow-forward", type=float, default=-0.16)
+    parser.add_argument("--axol-elbow-height", type=float, default=0.68)
+    parser.add_argument("--axol-elbow-lateral", type=float, default=0.20)
+    parser.add_argument(
+        "--settle-iterations",
+        type=int,
+        default=20,
+        help="IK iterations on the first frame before playback starts.",
+    )
     parser.add_argument("--port", type=int, default=8002)
-    parser.add_argument("--loop", action="store_true")
+    parser.add_argument(
+        "--loop",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Loop dataset replay indefinitely (default: on).",
+    )
     parser.add_argument(
         "--hold-after",
         type=float,
-        default=10.0,
-        help="Seconds to keep the Viser server alive after playback. Ignored with --loop.",
+        default=None,
+        help="Seconds to keep Viser alive after a non-looping replay. Default: indefinite.",
     )
     parser.add_argument("--save", default=None, help="Optional .npz path for solved joints.")
 
     parser.add_argument("--pos-weight", type=float, default=50.0)
     parser.add_argument("--ori-weight", type=float, default=0.0)
     parser.add_argument("--elbow-weight", type=float, default=5.0)
-    parser.add_argument("--max-joint-delta", type=float, default=0.25)
+    parser.add_argument("--max-joint-delta", type=float, default=0.35)
     parser.add_argument("--max-reach", type=float, default=0.8)
     return parser
 
@@ -310,8 +382,9 @@ async def replay_once(
     frame_indices: list[int],
     playback_fps: float,
     save_records: bool,
+    initial_q: np.ndarray,
 ) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray]]:
-    q = retargeter.q_rest.copy()
+    q = initial_q.copy()
     left, right = retargeter.split_for_sim(q)
     await sim.motion_control(left=left, right=right)
 
@@ -389,6 +462,24 @@ async def main_async() -> None:
         enable_right=not args.left_only,
         gripper=args.gripper,
     )
+    if args.axol_workspace == "front":
+        move_retargeter_to_front_workspace(
+            retargeter,
+            wrist_forward=args.axol_wrist_forward,
+            wrist_height=args.axol_wrist_height,
+            wrist_lateral=args.axol_wrist_lateral,
+            elbow_forward=args.axol_elbow_forward,
+            elbow_height=args.axol_elbow_height,
+            elbow_lateral=args.axol_elbow_lateral,
+        )
+
+    initial_q = settle_first_frame(
+        retargeter,
+        poses[frame_indices[0]],
+        0 if args.axol_workspace == "rest" else args.settle_iterations,
+    )
+    if args.axol_workspace == "front":
+        solver.set_posture_pose(initial_q)
 
     sim = Sim(port=args.port)
     await sim.enable()
@@ -398,7 +489,8 @@ async def main_async() -> None:
     print(
         "Replay config: "
         f"frames={len(frame_indices)}, fps={playback_fps:g}, "
-        f"scale={args.scale:g}, axis_map={args.axis_map!r}"
+        f"scale={args.scale:g}, axis_map={args.axis_map!r}, "
+        f"workspace={args.axol_workspace!r}"
     )
 
     all_q: list[np.ndarray] = []
@@ -414,6 +506,7 @@ async def main_async() -> None:
             frame_indices=frame_indices,
             playback_fps=playback_fps,
             save_records=bool(args.save and first_pass),
+            initial_q=initial_q,
         )
         all_q.extend(q_records)
         all_left.extend(left_records)
@@ -435,10 +528,11 @@ async def main_async() -> None:
             fps=np.asarray(playback_fps, dtype=np.float32),
             scale=np.asarray(args.scale, dtype=np.float32),
             axis_map=np.asarray(args.axis_map),
+            axol_workspace=np.asarray(args.axol_workspace),
         )
         print(f"Saved solved joints to {save_path}")
 
-    if args.hold_after > 0:
+    if args.hold_after is not None:
         print(f"Holding simulation for {args.hold_after:g}s...")
         await asyncio.sleep(args.hold_after)
 
@@ -449,4 +543,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
